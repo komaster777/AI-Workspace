@@ -1,0 +1,13 @@
+{% extends 'home/top_menu.html' %}
+
+{% block content %}
+<div class="container">
+
+    <h2>Добавить фотографию к исследованию: {{ researche.title }}</h2>
+    <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit">Сохранить</button>
+    </form>
+    </div>
+{% endblock %}

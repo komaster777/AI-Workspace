@@ -1,0 +1,29 @@
+{% extends 'home/top_menu.html' %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+{% block content %}
+<ul class="side-menu">
+<div class="container">
+<nav class="nav nav-pills flex-column flex-sm-row">
+  <a class="flex-sm-fill text-sm-center nav-link" aria-current="page" href="#">Классические методы СКЗ</a>
+  <a class="flex-sm-fill text-sm-center nav-link" href="{% url 'media_file_mask' media_file.id %}">Классические методы СКЗ</a>
+  <a class="flex-sm-fill text-sm-center nav-link" href="{% url 'media_file_pose' media_file.id %}">Нейросеть mediapipe</a>
+  <a class="flex-sm-fill text-sm-center nav-link active" href="{% url 'media_file_yolo' media_file.id %}">Нейросеть Yolo</a>
+</nav>
+    <div>
+</ul>
+<div class="container">
+<div class="media-title">
+    <h1>Классические методы opencv</h1>
+    <h2>{{ media_file.title|default:"Без названия" }}</h2>
+    <p>Принадлежит исследованию: {{ media_file.research.title }}</p>
+  <img width="1600" height="800" src="{% url 'media_file_YOLO_opencv' media_file.id %}">
+</div>
+{% endblock %}
+</body>
+</html>

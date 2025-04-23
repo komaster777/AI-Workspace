@@ -1,0 +1,37 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+  <head>
+    <!-- Обязательные метатеги -->
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.1/dist/css/bootstrap.min.css"
+          rel="stylesheet" integrity="sha384-+0n0xVW2eSR5OomGNYDnhzAbDsOXxcvSN1TPprVMTNDbiYZCxYbOOl7+AMvyTG2x"
+          crossorigin="anonymous">
+      <link rel="stylesheet" href="{% static 'css/style.css' %}">
+  </head>
+  <body>
+
+ <nav class="navbar navbar-light bg-light">
+  <div class="container-fluid">
+    <a class="navbar-brand"> Opencv</a>
+          <a class="nav-link" href="{% url 'research_list'%}">Список исследования</a></li>
+
+    <a class="nav-link" href="#"></a>
+    <form class="d-flex">
+      <input class="form-control mr-2" type="search" placeholder="Search" aria-label="Search">
+      <button class="btn btn-outline-success" type="submit">Search</button>
+    </form>
+  </div>
+</nav>
+ <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.1/dist/js/bootstrap.bundle.min.js"
+         integrity="sha384-gtEjrD/SeCtmISkJkNUaaKMoLD0//ElJ19smozuHV6z3Iehds+3Ulb9Bn9Plx0x4"
+         crossorigin="anonymous"></script>
+ <br>
+ {% block content %}
+ {% endblock %}
+  <ul class="bottom-menu">
+
+</ul>
+  </body>
