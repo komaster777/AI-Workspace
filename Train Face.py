@@ -3,9 +3,9 @@ import cv2
 import numpy as np
 import pickle
 import torch
-import mediapipe as mp
 from facenet_pytorch import InceptionResnetV1
 from torchvision import transforms
+from ultralytics import YOLO
 
 # ✅ Используем GPU, если он доступен
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -17,8 +17,15 @@ REQUIRED_SIZE = (160, 160)
 
 # ✅ Инициализация моделей
 facenet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
-mp_face_detection = mp.solutions.face_detection
-face_detector = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+face_model = YOLO("yolov8n-face.pt").to(device)
+face_model.to("cuda")  # Явно переносим на GPU
+
+# Проверка, работает ли YOLO face на GPU
+face_model_device = face_model.device
+if face_model_device.type == 'cuda':
+    print(f"[INFO] YOLO face модель работает на GPU: {face_model_device}")
+else:
+    print(f"[INFO] YOLO face модель работает на CPU")
 
 # ✅ Преобразования для PyTorch
 transform = transforms.Compose([
@@ -40,14 +47,13 @@ def process_image(image_path):
     """Создает эмбеддинг лица из изображения"""
     image = cv2.imread(image_path)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = face_detector.process(image_rgb)
+    # Используем YOLO для детекции лиц
+    results = face_model.predict(image_rgb, imgsz=640, conf=0.5, verbose=False)[0]
 
-    if results.detections:
-        for detection in results.detections:
-            bbox = detection.location_data.relative_bounding_box
-            h, w, _ = image.shape
-            x, y, width, height = int(bbox.xmin * w), int(bbox.ymin * h), int(bbox.width * w), int(bbox.height * h)
-            face = image_rgb[y:y + height, x:x + width]
+    if results.boxes is not None:  # Проверяем, найдены ли лица
+        for box in results.boxes.xyxy:  # Координаты боксов
+            x1, y1, x2, y2 = map(int, box.tolist())  # Извлекаем координаты
+            face = image_rgb[y1:y2, x1:x2]  # Вырезаем область лица
 
             if face.shape[0] > 0 and face.shape[1] > 0:
                 face_tensor = transform(face).unsqueeze(0).to(device)  # Преобразуем в PyTorch тензор
@@ -72,8 +78,14 @@ for person_name in os.listdir(DATASET_PATH):
                     known_names.append(person_name)
                     print(f"[INFO] Добавлено: {person_name} ({image_name})")
 
-# ✅ Сохранение обновленной базы
+# ✅ Сохранение эмбеддингов как тензоров
 with open(OUTPUT_FILE, "wb") as f:
-    pickle.dump({"encodings": np.array(known_encodings), "names": known_names}, f)
+    pickle.dump({"encodings": known_encodings, "names": known_names}, f)
 
 print(f"[✅] Файл эмбеддингов обновлен: {OUTPUT_FILE}")
+print(f"[INFO] Всего лиц: {len(known_names)}")
+# Указываем путь к директории
+directory_path = "dataset/"
+folder_names = [name for name in os.listdir(directory_path) if os.path.isdir(os.path.join(directory_path, name))]
+print("Имена:", folder_names)
+

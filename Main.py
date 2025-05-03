@@ -1,16 +1,23 @@
 import os
+os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import cv2
 import subprocess
 import tkinter as tk
+import json
+from PIL import Image, ImageTk
 from tkinter import simpledialog, messagebox
 from tkinter import ttk  # Для создания ползунка
 import re  # Для проверки имени
 
 DATASET_PATH = "dataset/"
 
+
 # Функция для съемки и сохранения лица
 def capture_face():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
     if not cap.isOpened():
         messagebox.showerror("Ошибка", "Не удалось подключиться к камере.")
@@ -83,15 +90,126 @@ def update_database():
 # Функция для запуска Face Recognition
 def start_recognition():
     scale_value = scale_var.get()  # Получаем текущий масштаб
-    width = width_var.get()  # Получаем ширину
-    height = height_var.get()  # Получаем высоту
-    subprocess.Popen(["python", "Main Recognition.py", str(scale_value), str(width), str(height)])
+    width, height = resolution_options[selected_resolution.get()] # Получаем высоту и ширину окна
+    width_cam, height_cam = resol_cam_options[selected_resol_cam.get()]  # Получаем высоту и ширину окна
+    subprocess.Popen(["python", "Main Recognition.py", str(scale_value), str(width), str(height), str(width_cam), str(height_cam)])
 
 
 # Функция для обновления метки текущего значения масштаба
 def update_scale_label(value):
     scale_value_label.config(text=f"{float(value):.2f}")
 
+# Функция для определения рабочей зоны
+def define_work_zone():
+    cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
+
+    # Устанавливаем разрешение
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+
+    ret, frame = cap.read()
+    cap.release()
+
+
+    if not ret:
+        messagebox.showerror("Ошибка", "Не удалось получить изображение с камеры.")
+        return
+
+    scale_value = scale_var.get()  # Получаем текущий масштаб
+    width, height = resolution_options[selected_resolution.get()]  # Получаем высоту и ширину
+    output_resolution = (int(width * scale_value), int(height * scale_value))
+    frame_resized = cv2.resize(frame, output_resolution)
+
+    # Сохраняем снимок
+    snapshot_path = "workzone_snapshot.jpg"
+    cv2.imwrite(snapshot_path, frame_resized)
+
+
+
+    # Загружаем изображение для Tkinter
+    img = Image.open(snapshot_path)
+    tk_img = ImageTk.PhotoImage(img)
+
+    # Создаем новое окно для редактирования зоны
+    zone_window = tk.Toplevel(root)
+    zone_window.title("Обозначьте рабочую зону")
+
+    canvas = tk.Canvas(zone_window, width=img.width, height=img.height)
+    canvas.pack()
+
+    canvas.create_image(0, 0, anchor="nw", image=tk_img)
+    canvas.image = tk_img  # нужно сохранить ссылку, чтобы не удалялось
+
+    # Начальные 4 точки (прямоугольник в центре)
+    h, w = img.height, img.width
+    points = [
+        [w // 3, h // 3],
+        [2 * w // 3, h // 3],
+        [2 * w // 3, 2 * h // 3],
+        [w // 3, 2 * h // 3]
+    ]
+    point_circles = []
+    polygon = None
+
+    def draw_zone():
+        nonlocal polygon
+        if polygon:
+            canvas.delete(polygon)
+        polygon = canvas.create_polygon(*sum(points, []), outline="red", width=2, fill="", tags="zone")
+
+        for c in point_circles:
+            canvas.delete(c)
+        point_circles.clear()
+
+        for i, (x, y) in enumerate(points):
+            circle = canvas.create_oval(x-5, y-5, x+5, y+5, fill="blue", tags=f"pt{i}")
+            point_circles.append(circle)
+
+    selected_point = [None]  # Используем список, чтобы менять из вложенной функции
+
+    def on_press(event):
+        item = canvas.find_withtag("current")
+        tags = canvas.gettags(item)
+        for tag in tags:
+            if tag.startswith("pt"):
+                selected_point[0] = int(tag[2:])  # индекс активной точки
+                break
+
+    def on_release(event):
+        selected_point[0] = None  # Отпустили — сбросили выбор
+
+    def on_drag(event):
+        idx = selected_point[0]
+        if idx is not None:
+            x = max(0, min(event.x, w))
+            y = max(0, min(event.y, h))
+            points[idx] = [x, y]
+            draw_zone()
+
+    canvas.bind("<Button-1>", on_press)
+    canvas.bind("<ButtonRelease-1>", on_release)
+    canvas.bind("<B1-Motion>", on_drag)
+
+    draw_zone()
+
+    # Кнопка сохранения координат
+    def save_zone():
+        # Сохраняем масштаб и разрешение в JSON
+        zone_data = {
+            "points": points,
+            "scale": scale_var.get(),  # сохраняем выбранный масштаб
+            "resolution": resolution_options[selected_resolution.get()]
+        }
+        with open("work_zone.json", "w") as f:
+            json.dump(zone_data, f)
+        messagebox.showinfo("Готово", "Рабочая зона сохранена в work_zone.json")
+        zone_window.destroy()
+
+    btn_save = tk.Button(zone_window, text="💾 Сохранить зону", command=save_zone)
+    btn_save.pack(pady=10)
+
+    zone_window.bind("<Return>", lambda event: save_zone())  # ← Привязка Enter
 
 # Создание окна
 root = tk.Tk()
@@ -121,26 +239,66 @@ scale_slider.pack(side="left", padx=5)
 scale_value_label = tk.Label(scale_frame, text=f"{scale_var.get():.2f}")
 scale_value_label.pack(side="left")
 
-# Поля для ввода ширины и высоты
-resolution_label = tk.Label(root, text="Разрешение видео (например, 1920 x 1080):")
+# Поля для ввода ширины и высоты для окна
+resolution_label = tk.Label(root, text="Разрешение окна:")
 resolution_label.pack(pady=5)
+resolution_options = {
+    "2560 x 1440": (2560, 1440),
+    "1920 x 1080": (1920, 1080),
+    "1600 x 900": (1600, 900),
+    "1280 x 720": (1280, 720),
+    "800 x 600": (800, 600),
+    "640 x 480": (640, 480)
+}
+selected_resolution = tk.StringVar(value="1920 x 1080")
 
-resolution_frame = tk.Frame(root)
-resolution_frame.pack(pady=5)
+resolution_combobox = ttk.Combobox(root, textvariable=selected_resolution, values=list(resolution_options.keys()), state="readonly")
+resolution_combobox.pack(pady=5)
 
-width_var = tk.IntVar(value=1920)  # Значение ширины по умолчанию
-height_var = tk.IntVar(value=1080)  # Значение высоты по умолчанию
+# Поля для ввода ширины и высоты для камеры
+resol_cam_label = tk.Label(root, text="Разрешение камеры:")
+resol_cam_label.pack(pady=5)
+resol_cam_options = {
+    "2560 x 1440": (2560, 1440),
+    "1920 x 1080": (1920, 1080),
+    "1600 x 900": (1600, 900),
+    "1280 x 720": (1280, 720),
+    "800 x 600": (800, 600),
+    "640 x 480": (640, 480)
+}
+selected_resol_cam = tk.StringVar(value="2560 x 1440")
 
-width_entry = tk.Entry(resolution_frame, textvariable=width_var, width=10)
-width_entry.pack(side="left", padx=5)
+resol_cam_combobox = ttk.Combobox(root, textvariable=selected_resol_cam, values=list(resol_cam_options.keys()), state="readonly")
+resol_cam_combobox.pack(pady=5)
 
-x_label = tk.Label(resolution_frame, text="x")
-x_label.pack(side="left")
-
-height_entry = tk.Entry(resolution_frame, textvariable=height_var, width=10)
-height_entry.pack(side="left", padx=5)
+# resolution_frame = tk.Frame(root)
+# resolution_frame.pack(pady=5)
+#
+# width_var = tk.IntVar(value=1920)  # Значение ширины по умолчанию
+# height_var = tk.IntVar(value=1080)  # Значение высоты по умолчанию
+#
+# width_entry = tk.Entry(resolution_frame, textvariable=width_var, width=10)
+# width_entry.pack(side="left", padx=5)
+#
+# x_label = tk.Label(resolution_frame, text="x")
+# x_label.pack(side="left")
+#
+# height_entry = tk.Entry(resolution_frame, textvariable=height_var, width=10)
+# height_entry.pack(side="left", padx=5)
 
 btn_start = tk.Button(root, text="▶ Запустить Face & Body Recognition", command=start_recognition)
 btn_start.pack(pady=10)
 
+btn_zone = tk.Button(root, text="◼ Обозначить рабочую зону", command=define_work_zone)
+btn_zone.pack(pady=10)
+
+# Завершение по ESC
+def on_escape(event=None):
+
+    cv2.destroyAllWindows()
+    root.quit()
+
+root.bind("<Escape>", on_escape)
+
 root.mainloop()
+

@@ -1,145 +1,573 @@
+import os
+os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import cv2
+from threading import Thread
 import numpy as np
+import torch
 import pickle
 import time
-import mediapipe as mp
-import torch
-import sys  # Для получения аргументов командной строки
+import sys
+import tkinter as tk
+import json
+from tkinter import ttk
+from PIL import Image, ImageTk
+from ultralytics import YOLO
 from facenet_pytorch import InceptionResnetV1
-from scipy.spatial.distance import cdist
+# from scipy.spatial.distance import cdist
+from collections import deque
+# import mediapipe as mp
 
-# ✅ Автоматическое включение GPU (если доступен)
+
+# Настройки устройства и интерфейса
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"[INFO] Используем устройство: {device}")
+print(f"[INFO] Используется устройство: {device}")
 
-# ✅ Инициализация детектора лиц (Mediapipe)
-mp_face_detection = mp.solutions.face_detection
-face_detector = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+# Окно Tkinter
+root = tk.Tk()
+root.title("Присутствие сотрудников")
+root.geometry("300x600")
+status_frame = ttk.Frame(root)
+status_frame.pack(fill=tk.BOTH, expand=True)
+status_labels = {}
 
-# ✅ Инициализация Mediapipe Pose для отслеживания тела
-mp_pose = mp.solutions.pose
-pose_tracker = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+# Цветные иконки статуса
+def get_status_icon(present=True):
+    size = 20
+    img = Image.new("RGB", (size, size), (0, 255, 0) if present else (255, 0, 0))
+    if present:
+        for x in range(size):
+            for y in range(size):
+                if (x - size // 2) ** 2 + (y - size // 2) ** 2 > (size // 2) ** 2:
+                    img.putpixel((x, y), (255, 255, 255))
+    return ImageTk.PhotoImage(img)
 
-# ✅ Инициализация FaceNet (InceptionResnetV1) для создания эмбеддингов
+status_icons = {
+    True: get_status_icon(True),
+    False: get_status_icon(False),
+}
+
+# Создание строки в UI
+def create_status_row(name):
+    row = ttk.Frame(status_frame)
+    row.pack(fill=tk.X, pady=2)
+    icon_label = tk.Label(row, image=status_icons[False])
+    icon_label.pack(side=tk.LEFT, padx=5)
+    name_label = ttk.Label(row, text=f"{name}: ⬛ Не на месте", anchor="w")
+    name_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    status_labels[name] = {
+        "row": row,
+        "icon": icon_label,
+        "label": name_label
+    }
+
+
+# Обновление строки в UI
+def update_status_row(name, present):
+    if name == "Recognizing...":
+        # Не обновляем статус для "Распознается..."
+        return
+    if name not in status_labels:
+        create_status_row(name)
+    icon = status_icons[present]
+    text = "\U0001F7E2 На рабочем месте" if present else "⬛ Не на месте"
+    status_labels[name]["icon"].config(image=icon)
+    status_labels[name]["label"].config(text=f"{name}: {text}")
+
+# Параметры окна
+scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0 # Масштаб
+width = int(sys.argv[2]) if len(sys.argv) > 2 else 1920 # Ширина окна
+height = int(sys.argv[3]) if len(sys.argv) > 3 else 1080 # Высота окна
+output_resolution = (int(width * scale), int(height * scale)) # Разрешение окна
+width_cam = int(sys.argv[4]) if len(sys.argv) > 4 else 2560 # Ширина камеры
+height_cam = int(sys.argv[5]) if len(sys.argv) > 5 else 1440 # Высота камеры
+resolution_cam = (int(width_cam * scale), int(height_cam * scale)) # Разрешение камеры
+
+print(f"[INFO] Масштаб окна: {scale}, разрешение: {width}x{height}")
+print(f"[INFO] Разрешение камеры: {width_cam}x{height_cam}")
+
+# Модели
+object_model = YOLO("yolov8n.pt").to(device)
+object_model.to("cuda")  # Явно переносим на GPU
+face_model = YOLO("yolov8n-face.pt").to(device)
+face_model.to("cuda")  # Явно переносим на GPU
+pose_model = YOLO("yolov8n-pose.pt").to(device)
+pose_model.to("cuda")  # Явно переносим на GPU
 facenet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
+
+
+# Проверка, работает ли YOLO на GPU
+object_model_device = object_model.device
+if object_model_device.type == 'cuda':
+    print(f"[INFO] YOLO модель работает на GPU: {object_model_device}")
+else:
+    print(f"[INFO] YOLO модель работает на CPU")
+# Проверка, работает ли YOLO pose на GPU
+pose_model_device = pose_model.device
+if pose_model_device.type == 'cuda':
+    print(f"[INFO] YOLO pose модель работает на GPU: {pose_model_device}")
+else:
+    print(f"[INFO] YOLO pose модель работает на CPU")
+
+# Проверка, работает ли YOLO face на GPU
+face_model_device = face_model.device
+if face_model_device.type == 'cuda':
+    print(f"[INFO] YOLO face модель работает на GPU: {face_model_device}")
+else:
+    print(f"[INFO] YOLO face модель работает на CPU")
+
+# Проверка, работает ли FaceNet на GPU
+if device.type == 'cuda':
+    print(f"[INFO] FaceNet работает на GPU: {device}")
+else:
+    print(f"[INFO] FaceNet работает на CPU")
+
+# Порог распознавания
+recognition_t = 0.6
 required_size = (160, 160)
-recognition_t = 0.75  # Порог идентификации
 
-# ✅ Получение масштаба и разрешения из аргументов командной строки
-scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
-width = int(sys.argv[2]) if len(sys.argv) > 2 else 1920
-height = int(sys.argv[3]) if len(sys.argv) > 3 else 1080
-print(f"[INFO] Масштаб окна: {scale}")
-print(f"[INFO] Разрешение видео: {width} x {height}")
-
-# ✅ Разрешение вывода видео
-output_resolution = (int(width * scale), int(height * scale))
-
-# ✅ Словарь для привязки тела к распознанному лицу
-tracked_people = {}
-
-# ✅ Функция для обнаружения лиц
-def detect_faces(image):
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = face_detector.process(image_rgb)
-    faces = []
-    if results.detections:
-        for detection in results.detections:
-            bboxC = detection.location_data.relative_bounding_box
-            h, w, _ = image.shape
-            x, y, width, height = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
-            faces.append((x, y, width, height))
-    return faces
-
-# ✅ Функция загрузки эмбеддингов
+# Загрузка эмбеддингов лиц
 def load_encodings(path="face_encodings.pkl"):
     with open(path, "rb") as f:
         data = pickle.load(f)
     return np.array(data["encodings"]), data["names"]
 
-# ✅ Загрузка обученной базы
-known_face_encodings, known_face_names = load_encodings()
+known_face_encodings_np, known_face_names = load_encodings()
+known_face_encodings = torch.tensor(known_face_encodings_np, dtype=torch.float32).to(device)
+# Нормализуем векторы
+known_norm = torch.nn.functional.normalize(known_face_encodings, dim=1)
 
-# ✅ Настройка камеры
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
-cap.set(cv2.CAP_PROP_FPS, 30)
+# Детекция лиц через YOLO
+def detect_faces(image):
+    results = face_model.predict(image, imgsz=640, conf=0.5, verbose=False)[0]
+    faces = []
+    if results.boxes is not None:
+        for box, conf in zip(results.boxes.xyxy, results.boxes.conf):
+            x1, y1, x2, y2 = map(int, box.tolist())
+            w, h = x2 - x1, y2 - y1
+            confidence = float(conf.item())
+            faces.append((x1, y1, w, h, confidence))
+    return faces
 
-# ✅ Регулирование FPS
+def detect_objects_in_hands(frame, pose_results):
+    objects_in_hands = []
+    results = object_model.predict(frame, imgsz=640, conf=0.5, verbose=False)[0]
+
+    if pose_results.keypoints is not None and results.boxes is not None:
+        for person in pose_results.keypoints:
+            # Координаты левой и правой руки
+            left_hand = person[9][:2].cpu().numpy()  # Левая рука (x, y)
+            right_hand = person[10][:2].cpu().numpy()  # Правая рука (x, y)
+
+            # Проверяем пересечение объектов с руками
+            for box, conf, cls in zip(results.boxes.xyxy, results.boxes.conf, results.boxes.cls):
+                x1, y1, x2, y2 = map(int, box.tolist())
+                object_center = np.array([(x1 + x2) // 2, (y1 + y2) // 2])
+                distance_to_left = np.linalg.norm(left_hand - object_center)
+                distance_to_right = np.linalg.norm(right_hand - object_center)
+
+                # Если объект находится близко к руке (например, < 50 пикселей)
+                if distance_to_left < 50 or distance_to_right < 50:
+                    objects_in_hands.append({
+                        "object": object_model.names[int(cls)],
+                        "confidence": float(conf.item()),
+                        "bbox": (x1, y1, x2, y2)
+                    })
+    return objects_in_hands
+
+# Проверка пересечения прямоугольника и четырехугольника
+def bbox_intersects_polygon(bbox, polygon):
+    x1, y1, x2, y2 = bbox
+    corners = np.array([(x1, y1), (x2, y1), (x2, y2), (x1, y2)], dtype=np.int32)
+    intersection, _ = cv2.intersectConvexConvex(corners, np.array(polygon, dtype=np.int32))
+    return intersection > 0
+
+
+
+print("Запускаем камеру")
+
+# Камера
+cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, width_cam)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height_cam)
+# cap.set(cv2.CAP_PROP_FPS, 30)
+
+frame = None
+ret = False
+
+def capture_frames():
+    global frame, ret
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("[ERROR] Нет кадра с камеры в функции")
+            break
+
+# Запуск потока захвата кадров
+thread = Thread(target=capture_frames, daemon=True)
+thread.start()
+
+
+# Тайминг
 desired_fps = 30
 frame_time = 1.0 / desired_fps
 
+# Загрузка рабочей зоны из JSON
+zone_path = "work_zone.json"
+if os.path.exists(zone_path):
+    with open(zone_path, "r") as f:
+        zone_data = json.load(f)
+
+    # Преобразуем координаты к кортежам (из списков)
+    zone_bbox = [tuple(pt) for pt in zone_data.get("points", [])]
+    zone_scale = zone_data.get("scale", 1.0)
+    zone_resolution = zone_data.get("resolution", [1920, 1080])
+    input_resolution = (int(zone_resolution[0] * zone_scale), int(zone_resolution[1] * zone_scale))
+    print(f"[INFO] Координаты зоны: {zone_bbox}")
+    print(f"[INFO] Масштаб зоны: {zone_scale}")
+    print(f"[INFO] Разрешение зоны: {zone_resolution}")
+
+    # if input_resolution != output_resolution:
+    # Масштабируем координаты зоны под текущее разрешение и масштаб отображения
+    ratio_x = (width_cam) / (zone_resolution[0] * zone_scale)
+    ratio_y = (height_cam) / (zone_resolution[1] * zone_scale)
+    zone_bbox = [(int(x * ratio_x), int(y * ratio_y)) for (x, y) in zone_bbox]
+    print(f"[INFO] Масштабированные координаты зоны: {zone_bbox}")
+
+else:
+    # Если файл не найден — используем дефолтную зону
+    print("⚠ Файл work_zone.json не найден. Используется зона по умолчанию.")
+    zone_bbox = [(200, 300), (800, 300), (800, 900), (200, 900)]
+    ratio_x = (width_cam) / 2560
+    ratio_y = (height_cam) / 1440
+    zone_bbox = [(int(x * ratio_x), int(y * ratio_y)) for (x, y) in zone_bbox]
+
+
+# Конвертируем в NumPy-массив после масштабирования
+zone_pts = np.array(zone_bbox, dtype=np.int32)
+
+# Отслеживаемые люди: track_id → {name, bbox, last_seen, first_seen}
+tracked_people = {}
+# Временные лица в статусе "Recognizing..."
+pending_faces = {}
+
+# Завершение по ESC
+def on_escape(event=None):
+    cap.release()
+    cv2.destroyAllWindows()
+    root.quit()
+
+root.bind("<Escape>", on_escape)
+
+# ЕСЛИ НУЖНО ЛОГИРОВАТЬ ЧАСТОТУ КАДРОВ В СКРИПТЕ: Remove indication.py -> inser_fps_logs
+# def log_with_fps(tag, start_time):
+#     elapsed = time.time() - start_time
+#     fps = 1 / elapsed if elapsed > 0 else float('inf')
+#     print(f"[INFO] {tag}: {fps:.3f} FPS")
+
+camera_wait = 0
+# time_count = 0
+
+# Основной цикл
 while True:
-    start_time = time.time()
-    ret, frame = cap.read()
-    if not ret:
-        print("[ERROR] Не удалось получить кадр с камеры.")
+    if not ret and camera_wait >= 10:
+        print("[ERROR] Нет кадра с камеры")
         break
+    if not ret or frame is None:
+        # Камера еще не готова, подождем 0.5 сек.
+        time.sleep(0.50)
+        camera_wait += 1
+        print(f"[INFO] Камера не готова. Ожидание... {camera_wait} попыток")
+        continue
 
-    faces = detect_faces(frame)
+    # Если кадр успешно получен, сбрасываем счётчик ожиданий
+    camera_wait = 0
+    # if time_count > 0:
+
+    start_time = time.time()
+    # time_count += 1
+
+    # s_time = time.time()
+
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    pose_results = pose_tracker.process(frame_rgb)
+    faces = detect_faces(frame)
+    pose_results = pose_model.track(frame, persist=True, imgsz=640, conf=0.5, verbose=False)[0]
 
-    body_x_min, body_y_min = float('inf'), float('inf')
-    body_x_max, body_y_max = 0, 0
-
-    for (x, y, w, h) in faces:
-        face_image = frame[y:y + h, x:x + w]
-
-        if face_image is None or face_image.size == 0:
-            print("[ERROR] Лицо не найдено или вышло за границы кадра.")
+    bodies = []
+    if pose_results.boxes.id is not None:
+        for box, tid in zip(pose_results.boxes.xyxy, pose_results.boxes.id.int().cpu().tolist()):
+            x1, y1, x2, y2 = map(int, box.cpu().numpy())
+            bodies.append({'id': tid, 'bbox': (x1, y1, x2, y2)})
+    # print(f"Время работы с box: {time.time() - s_time:.6f} секунд")
+    for (x, y, w, h, confidence) in faces:
+        face_img = frame[y:y + h, x:x + w]
+        if face_img is None or face_img.size == 0:
             continue
 
-        face_image_resized = cv2.resize(face_image, required_size)
-        face_image_tensor = torch.tensor(face_image_resized, dtype=torch.float32).permute(2, 0, 1) / 255.0
-        face_image_tensor = face_image_tensor.unsqueeze(0).to(device)
+        # s_time = time.time()
+
+        # Преобразуем изображение лица в tensor и нормализуем
+        face_tensor = torch.tensor(cv2.resize(face_img, required_size), dtype=torch.float32).permute(2, 0, 1) / 255.0
+        face_tensor = face_tensor.unsqueeze(0).to(device)
 
         with torch.no_grad():
-            face_encoding = facenet(face_image_tensor).cpu().numpy()
+            encoding = facenet(face_tensor)  # shape: (1, 512)
 
-        distances = cdist(known_face_encodings, face_encoding, metric="cosine").flatten()
-        min_distance = np.min(distances)
-        best_match = np.argmin(distances)
+        # Нормализуем векторы
+        encoding_norm = torch.nn.functional.normalize(encoding, dim=1)
 
-        name = "Unknown"
-        if min_distance < recognition_t:
-            name = known_face_names[best_match]
-            tracked_people[name] = time.time()
+        # Вычисляем косинусную близость, затем преобразуем в косинусное расстояние
+        cos_sim = torch.mm(known_norm, encoding_norm.t()).squeeze(1)  # shape: (N,)
+        distances = 1 - cos_sim  # shape: (N,)
+        min_dist, min_idx = torch.min(distances, dim=0)
+        min_dist = min_dist.item()
 
-        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(frame, f"{name} ({(1 - min_distance) * 100:.2f}%)", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        # print(f"Минимальное расстояние: {min_dist}")
+        # print(f"Имя: {known_face_names[min_idx.item()]}")
+        # print(f"min_idx: {min_idx}, всего известных лиц: {len(known_face_names)}")
 
-    if pose_results.pose_landmarks:
-        h, w, _ = frame.shape
-        for landmark in pose_results.pose_landmarks.landmark:
-            x, y = int(landmark.x * w), int(landmark.y * h)
-            body_x_min, body_y_min = min(body_x_min, x), min(body_y_min, y)
-            body_x_max, body_y_max = max(body_x_max, x), max(body_y_max, y)
+        face_center = np.array([x + w / 2, y + h / 2])
+        assigned_body, min_body_dist = None, float("inf")
 
-        for name in list(tracked_people.keys()):
-            last_seen = tracked_people[name]
-            if time.time() - last_seen < 3:
-                # Рисуем прямоугольник вокруг тела
-                cv2.rectangle(frame, (body_x_min, body_y_min), (body_x_max, body_y_max), (255, 0, 0), 2)
-                cv2.putText(frame, name, (body_x_min, body_y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            else:
-                del tracked_people[name]
+        for body in bodies:
+            # print(f"Body ID: {body['id']}, BBox: {body['bbox']}")
+            bx1, by1, bx2, by2 = body['bbox']
+            center = np.array([(bx1 + bx2) / 2, (by1 + by2) / 2])
+            dist = np.linalg.norm(center - face_center)
+            if dist < min_body_dist:
+                assigned_body, min_body_dist = body, dist
+
+        face_rect_color = (0, 255, 0)  # Зеленый по умолчанию
+        face_text_top = ""
+
+        # if (time.time() - s_time) > 0.2:
+        #     cv2.imwrite(f"debug_faces/Векторы{tracked_people[track_id]['name']}_{int(time.time())}.jpg", face_img)
+        #
+        # print(f"Время выполнения нормализ векторов и сравн расст тел: {time.time() - s_time:.6f} секунд")
+
+        # s1_time = time.time()
+
+        if assigned_body:
+            # print(f"[INFO] Проверка на тело")
+            # print(f"[INFO] min_dist: {min_dist}")
+            track_id = assigned_body['id']
+
+
+
+            if track_id in tracked_people:
+                now = time.time()
+                current_name = tracked_people[track_id]['name'] # Старое имя
+
+
+                # ✅ Обновление face_bbox даже если имя = Unknown
+                # if name == "Unknown":
+                tracked_people[track_id]['face_bbox'] = (x, y, w, h)
+
+                # Проверяем, что лицо присутствует
+                if face_img is not None and face_img.size > 0:
+
+                    # s_time = time.time()
+
+                    # Перепроверка лиц на точность распознания
+                    if now - tracked_people[track_id].get("last_check2", 0) >= 1.0:
+                        # print("[INFO] Проверка на перераспознание")
+                        # print(f"[INFO] min_dist: {min_dist}")
+                        if min_dist < recognition_t:
+                            new_name = known_face_names[min_idx.item()]
+
+                            # Проверяем, изменилось ли имя
+                            if new_name != current_name and new_name != "Unknown":
+                                tracked_people[track_id]['name'] = new_name  # Назначаем новое имя
+                                tracked_people[track_id]['confidence_window'].clear()  # Очищаем окно уверенности
+                                # print(f"[INFO] Очередь confidence_window для ID {track_id} очищена.")
+                                cv2.imwrite(f"debug_faces/Перезапись{new_name}_{int(time.time())}.jpg", face_img)
+                                print(f"[INFO] Новое имя: {new_name}")
+                                still_present = any(
+                                    p['name'] == current_name and bbox_intersects_polygon(p['bbox'], zone_bbox)
+                                    for track_id2, p in tracked_people.items() if track_id2 != track_id
+                                )
+                                if not still_present and current_name in status_labels:
+                                    update_status_row(current_name, False)
+                                    if current_name == "Unknown":
+                                        status_labels[current_name]["row"].destroy()
+                                        del status_labels[current_name]
+
+                        # Обновляем время последней проверки
+                        tracked_people[track_id]['last_check2'] = now
+
+                        # print(f"Время выполнения Перепроверка лиц на точность распознания: {time.time() - s_time:.6f} секунд")
+
+                    # s_time = time.time()
+
+                    # Сброс в Unknown при низкой уверенности в распозновании
+                    if now - tracked_people[track_id].get("last_check1", 0) >= 0.4 and name != "Unknown":
+                        # Получаем координаты лица
+                        fx, fy, fw, fh = tracked_people[track_id].get('face_bbox', (0, 0, 0, 0))
+                        face_img = frame[fy:fy + fh, fx:fx + fw]
+
+
+                        conf = 1.0 - min_dist  # Уверенность
+                        is_confident = conf > 0.3  # Уверенность, что распознанно верно
+                        tracked_people[track_id]['confidence_window'].append(is_confident)  # Добавление в конце очереди словаря True/False
+
+                        print(f"[INFO] Старое имя: {current_name}")
+                        print(f"[INFO] Уверенность: {conf} ")
+                        print(f"[INFO] Очередь: {tracked_people[track_id].get('confidence_window')} ")
+
+                        # Если более 4 из 5 проверок — низкая уверенность
+                        if tracked_people[track_id]['confidence_window'].count(False) >= 4:
+                            if current_name != "Unknown":
+                                tracked_people[track_id]['name'] = "Unknown"
+                                # print(f"[INFO] Новое имя: {tracked_people[track_id]['name']}")
+                                still_present = any(
+                                    p['name'] == current_name and bbox_intersects_polygon(p['bbox'], zone_bbox)
+                                    for track_id2, p in tracked_people.items() if track_id2 != track_id
+                                )
+                                if not still_present and current_name in status_labels:
+                                    update_status_row(current_name, False)
+
+                        # Обновляем время последней проверки
+                        tracked_people[track_id]['last_check1'] = now
+
+                        # print(f"Время выполнения Сброс в Unknown при низкой уверенности в распозновании: {time.time() - s_time:.6f} секунд")
+
+                name = tracked_people[track_id]['name']
+                # distances = cdist(known_face_encodings, encoding, metric="cosine").flatten()
+
+                recog_conf = 1.0 - min_dist
+                face_text_top = f"ID: {track_id} - {name} ({recog_conf:.2f})"
+                face_rect_color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+
+            elif track_id not in tracked_people:
+                now = time.time()
+
+                if track_id not in pending_faces:
+                    pending_faces[track_id] = {
+                        'encoding': encoding,
+                        'first_seen': now,
+                        'bbox': assigned_body['bbox'],
+                        'face_bbox': (x, y, w, h)
+                    }
+                else:
+                    # ✅ обновляем координаты лица каждый кадр, пока лицо распознается
+                    pending_faces[track_id]['face_bbox'] = (x, y, w, h)
+                    # distances = cdist(known_face_encodings, encoding, metric="cosine").flatten()
+                    # min_dist = np.min(distances)
+                    if min_dist < recognition_t:
+                        # used_names = [p['name'] for p in tracked_people.values()]
+                        matched_name = known_face_names[min_idx.item()]
+                        # if matched_name not in used_names:
+                        tracked_people[track_id] = {
+                            'name': matched_name,
+                            'bbox': assigned_body['bbox'],
+                            'face_bbox': (x, y, w, h),
+                            'last_seen': now,
+                            'first_seen': now,
+                            'last_retry': now,
+                            'last_check1': now,
+                            'last_check2': now,
+                            'IDs': 0,
+                            'confidence_window': deque(maxlen=5)
+                        }
+                        del pending_faces[track_id]
+                    elif now - pending_faces[track_id]['first_seen'] >= 3.0:
+                        matched_name = "Unknown"
+                        tracked_people[track_id] = {
+                            'name': matched_name,
+                            'bbox': assigned_body['bbox'],
+                            'face_bbox': (x, y, w, h),
+                            'last_seen': now,
+                            'first_seen': now,
+                            'last_retry': now,
+                            'last_check1': now,
+                            'last_check2': now,
+                            'confidence_window': deque(maxlen=5)
+                        }
+                        del pending_faces[track_id]
+
+            if track_id in pending_faces:
+                    face_text_top = f"ID: {track_id} - Recognizing..."
+                    face_rect_color = (0, 255, 255)
+
+            # print(f"Время выполнения assigned_body: {time.time() - s1_time:.6f} секунд")
+
+        # --- Отрисовка прямоугольника вокруг лица и текстов ---
+        cv2.rectangle(frame, (x, y), (x + w, y + h), face_rect_color, 2)
+
+        if face_text_top:
+            cv2.putText(frame, face_text_top, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, face_rect_color, 2)
+
+        cv2.putText(frame, f"{confidence:.2f}", (x, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    # s_time = time.time()
+    for body in bodies:
+        if body['id'] not in tracked_people:
+            continue
+        track_id = body['id']
+        if track_id in tracked_people:
+            tracked_people[track_id]['bbox'] = body['bbox']
+            tracked_people[track_id]['last_seen'] = time.time()
+
+    # print(f"Время body in bodies: {time.time() - s_time:.6f} секунд")
+    # s_time = time.time()
+    # удаления записей о людях из списка tracked_people, если они не были замечены в кадре более 5 секунд
+    for tid in list(set(list(tracked_people.keys()) + list(pending_faces.keys()))):
+        if tid in tracked_people and time.time() - tracked_people[tid]['last_seen'] > 5:
+            name = tracked_people[tid]['name']
+            update_status_row(name, False)  # ✅ Обновляем статус как "Не на месте"
+            del tracked_people[tid]
+            if tid in pending_faces:
+                del pending_faces[tid]
+            continue
+
+
+
+        if tid in pending_faces and tid not in tracked_people:
+            continue  # ещё распознается, пока не переходит в tracked_people
+
+        if tid not in tracked_people:
+            continue  # ни в pending_faces, ни в tracked_people
+
+        name = tracked_people[tid]['name']
+        x1, y1, x2, y2 = tracked_people[tid]['bbox']
+        in_zone = bbox_intersects_polygon((x1, y1, x2, y2), zone_bbox)
+        name = tracked_people[tid]['name']
+        now = time.time()
+
+
+        # Обновляем переменную name из актуального состояния tracked_people
+        name = tracked_people[tid]['name']
+        update_status_row(name, in_zone)
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        cv2.putText(frame, f"ID: {track_id} - {name}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        # print(f"Время выполнения удаления записей о людях: {time.time() - s_time:.6f} секунд")
+    # print(f"[INFO] Количество лиц в кадре: {len(faces)}")
+
+    # s_time = time.time()
+    zone_pts = np.array(zone_bbox, dtype=np.int32)
+    cv2.polylines(frame, [zone_pts], isClosed=True, color=(0, 255, 255), thickness=3)
 
     frame_resized = cv2.resize(frame, output_resolution)
 
     fps = 1 / (time.time() - start_time)
     cv2.putText(frame_resized, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    cv2.imshow("Face & Body Recognition", frame_resized)
+    cv2.imshow("Face + Body Tracking", frame_resized)
 
-    elapsed_time = time.time() - start_time
-    sleep_time = max(0, frame_time - elapsed_time)
-    time.sleep(sleep_time)
-
-    if cv2.waitKey(5) == 27:
+    # Проверка, закрыто ли окно Tkinter
+    if not root.winfo_exists():
+        print("[INFO] Окно Tkinter закрыто. Завершение работы.")
         break
+    root.update()
+
+    # print(f"Время отрисовки и UI: {time.time() - s_time:.6f} секунд")
+
+    # Проверка закрытия окна OpenCV
+    if cv2.getWindowProperty("Face + Body Tracking", cv2.WND_PROP_VISIBLE) < 1:
+        break
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+
 
 cap.release()
 cv2.destroyAllWindows()
+root.destroy()
