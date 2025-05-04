@@ -1,6 +1,7 @@
 import os
 os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 import cv2
+import array
 from threading import Thread
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from tkinter import ttk
 from PIL import Image, ImageTk
 from ultralytics import YOLO
 from facenet_pytorch import InceptionResnetV1
+import mediapipe as mp
 # from scipy.spatial.distance import cdist
 from collections import deque
 # import mediapipe as mp
@@ -73,6 +75,19 @@ def update_status_row(name, present):
     status_labels[name]["icon"].config(image=icon)
     status_labels[name]["label"].config(text=f"{name}: {text}")
 
+# Обновление строки с информацией о предметах
+def update_status_with_objects(name, objects_in_hands):
+    if name not in status_labels:
+        create_status_row(name)
+
+    if objects_in_hands:
+        object_names = ", ".join([f"{obj['object']} ({obj['confidence']:.2f})" for obj in objects_in_hands])
+        text = f"\U0001F7E2 На рабочем месте: {object_names}"
+    else:
+        text = "\U0001F7E2 На рабочем месте (без предметов)"
+
+    status_labels[name]["label"].config(text=f"{name}: {text}")
+
 # Параметры окна
 scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0 # Масштаб
 width = int(sys.argv[2]) if len(sys.argv) > 2 else 1920 # Ширина окна
@@ -86,13 +101,16 @@ print(f"[INFO] Масштаб окна: {scale}, разрешение: {width}x{
 print(f"[INFO] Разрешение камеры: {width_cam}x{height_cam}")
 
 # Модели
-object_model = YOLO("yolov8n.pt").to(device)
+object_model = YOLO("yolo11s.pt").to(device)
 object_model.to("cuda")  # Явно переносим на GPU
 face_model = YOLO("yolov8n-face.pt").to(device)
 face_model.to("cuda")  # Явно переносим на GPU
 pose_model = YOLO("yolov8n-pose.pt").to(device)
 pose_model.to("cuda")  # Явно переносим на GPU
 facenet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
+# Инициализация модели отслеживания рук с использованием GPU
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=1)
 
 
 # Проверка, работает ли YOLO на GPU
@@ -148,31 +166,22 @@ def detect_faces(image):
             faces.append((x1, y1, w, h, confidence))
     return faces
 
-def detect_objects_in_hands(frame, pose_results):
-    objects_in_hands = []
-    results = object_model.predict(frame, imgsz=640, conf=0.5, verbose=False)[0]
+# Функция для вычисления пересечения двух прямоугольников
+def rects_intersect(body_rect, obj_rect):
+    x1_body, y1_body, x2_body, y2_body = body_rect
+    x1_obj, y1_obj, x2_obj, y2_obj = obj_rect
 
-    if pose_results.keypoints is not None and results.boxes is not None:
-        for person in pose_results.keypoints:
-            # Координаты левой и правой руки
-            left_hand = person[9][:2].cpu().numpy()  # Левая рука (x, y)
-            right_hand = person[10][:2].cpu().numpy()  # Правая рука (x, y)
+    # Вычисляем координаты пересечения
+    x_left = max(x1_body, x1_obj)
+    y_top = max(y1_body, y1_obj)
+    x_right = min(x2_body, x2_obj)
+    y_bottom = min(y2_body, y2_obj)
 
-            # Проверяем пересечение объектов с руками
-            for box, conf, cls in zip(results.boxes.xyxy, results.boxes.conf, results.boxes.cls):
-                x1, y1, x2, y2 = map(int, box.tolist())
-                object_center = np.array([(x1 + x2) // 2, (y1 + y2) // 2])
-                distance_to_left = np.linalg.norm(left_hand - object_center)
-                distance_to_right = np.linalg.norm(right_hand - object_center)
+    # Проверяем, есть ли пересечение
+    if x_left < x_right and y_top < y_bottom:
+        return True  # Прямоугольники пересекаются
+    return False
 
-                # Если объект находится близко к руке (например, < 50 пикселей)
-                if distance_to_left < 50 or distance_to_right < 50:
-                    objects_in_hands.append({
-                        "object": object_model.names[int(cls)],
-                        "confidence": float(conf.item()),
-                        "bbox": (x1, y1, x2, y2)
-                    })
-    return objects_in_hands
 
 # Проверка пересечения прямоугольника и четырехугольника
 def bbox_intersects_polygon(bbox, polygon):
@@ -292,6 +301,70 @@ while True:
     faces = detect_faces(frame)
     pose_results = pose_model.track(frame, persist=True, imgsz=640, conf=0.5, verbose=False)[0]
 
+    # Обрабатываем кадр для получения ключевых точек рук MediaPipe
+    # hand_results = hands.process(frame_rgb)
+
+    # Обнаруживаем объекты с помощью YOLO
+    object_results = object_model.predict(
+        frame,
+        imgsz=640,  # Размер входного изображения
+        conf=0.6,  # Порог уверенности, чем ниже, чтобы модель распознавала больше объектов
+        iou=0.4,  # Порог пересечения IoU, чем ниже, тем учитывать частичное перекрытие объектов.
+        verbose=False
+    )[0]
+
+    # Список классов, которые нужно игнорировать
+    ignored_classes = ["person", "car", "cat"]
+
+    if object_results.boxes is not None and len(object_results.boxes) > 0:
+        for box, conf, cls in zip(object_results.boxes.xyxy, object_results.boxes.conf,
+                                  object_results.boxes.cls):
+            class_name = object_model.names[int(cls)]
+            if class_name not in ignored_classes:
+                x1, y1, x2, y2 = map(int, box.tolist())
+                # Рисуем прямоугольник вокруг объекта
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                label = f"{object_model.names[int(cls)]} ({conf:.2f})"
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+        # print(f"удали {object_model.names[int(cls)]}")
+
+    #  Руки MediaPipe
+    # if hand_results.multi_hand_landmarks:
+    #     for hand_landmarks in hand_results.multi_hand_landmarks:
+    #         # Координаты для прямоугольника руки
+    #         h, w, _ = frame.shape
+    #         x_min, y_min = w, h
+    #         x_max, y_max = 0, 0
+    #
+    #         # Обходим все ключевые точки руки
+    #         for landmark in hand_landmarks.landmark:
+    #             x, y = int(landmark.x * w), int(landmark.y * h)
+    #             x_min = min(x_min, x)
+    #             y_min = min(y_min, y)
+    #             x_max = max(x_max, x)
+    #             y_max = max(y_max, y)
+    #
+    #         # Рисуем прямоугольник вокруг руки
+    #         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+    #         # Рисуем линии между точками руки
+    #         mp.solutions.drawing_utils.draw_landmarks(frame, hand_landmarks,
+    #                                                   mp_hands.HAND_CONNECTIONS)
+
+    objects_in_hands = []  # Список объектов, находящихся в руках
+
+
+
+    # Детекция объектов в руках
+    # objects_in_hands, key_hand = detect_objects_in_hands(frame, pose_results)
+    # key_hand.extend([1, left_hand[0], left_hand[1], right_hand[0], right_hand[1]])
+    # if len(key_hand) >= 5:
+    #     if key_hand[0] and key_hand[1]:
+    #         cv2.circle(frame, (key_hand[1], key_hand[2]), 50, (0, 255, 0),
+    #                    5)  # желтая зона близости правой руки
+    #     if key_hand[0] and key_hand[3]:
+    #         cv2.circle(frame, (key_hand[3], key_hand[4]), 50, (0, 255, 0),
+    #                    5)  # желтая зона близости правой руки
+
     bodies = []
     if pose_results.boxes.id is not None:
         for box, tid in zip(pose_results.boxes.xyxy, pose_results.boxes.id.int().cpu().tolist()):
@@ -356,6 +429,27 @@ while True:
             if track_id in tracked_people:
                 now = time.time()
                 current_name = tracked_people[track_id]['name'] # Старое имя
+
+
+
+                # Код для детекции предметов в руках MediaPipe
+                # if hand_results.multi_hand_landmarks:
+                #     if object_results.boxes is not None and len(object_results.boxes) > 0:
+                #         # Проверяем пересечение объектов с прямоугольником руки
+                #         for box, conf, cls in zip(object_results.boxes.xyxy, object_results.boxes.conf,
+                #                                   object_results.boxes.cls):
+                #             x1, y1, x2, y2 = map(int, box.tolist())
+                #             object_rect = (x1, y1, x2, y2)
+                #             hand_rect = (x_min, y_min, x_max, y_max)
+                #
+                #             # Если прямоугольники пересекаются
+                #             if rects_intersect(hand_rect, object_rect):
+                #                 objects_in_hands.append({
+                #                     "object": object_model.names[int(cls)],
+                #                     "confidence": float(conf.item()),
+                #                     "bbox": (x1, y1, x2, y2)
+                #                 })
+
 
 
                 # ✅ Обновление face_bbox даже если имя = Unknown
@@ -465,6 +559,7 @@ while True:
                             'last_retry': now,
                             'last_check1': now,
                             'last_check2': now,
+                            'last_objects': [],
                             'IDs': 0,
                             'confidence_window': deque(maxlen=5)
                         }
@@ -480,6 +575,7 @@ while True:
                             'last_retry': now,
                             'last_check1': now,
                             'last_check2': now,
+                            'last_objects': [],
                             'confidence_window': deque(maxlen=5)
                         }
                         del pending_faces[track_id]
@@ -519,12 +615,33 @@ while True:
             continue
 
 
-
         if tid in pending_faces and tid not in tracked_people:
             continue  # ещё распознается, пока не переходит в tracked_people
 
         if tid not in tracked_people:
             continue  # ни в pending_faces, ни в tracked_people
+
+        # Код для детекции предметов в руках через прямоугольник тела
+        if object_results.boxes is not None and len(object_results.boxes) > 0:
+            # Проверяем пересечение объектов с прямоугольником руки
+            for box, conf, cls in zip(object_results.boxes.xyxy, object_results.boxes.conf,
+                                      object_results.boxes.cls):
+                class_name = object_model.names[int(cls)]
+                if class_name not in ignored_classes:
+                    x1, y1, x2, y2 = map(int, box.tolist())
+                    object_rect = (x1, y1, x2, y2)
+                    x_min, y_min, x_max, y_max = tracked_people[tid]['bbox']
+                    body_rect = (x_min, y_min, x_max, y_max)
+                    x1, y1, x2, y2 = tracked_people[tid]['bbox']
+
+                    # Если прямоугольники пересекаются
+                    if rects_intersect(body_rect, object_rect):
+                        objects_in_hands.append({
+                            "object": object_model.names[int(cls)],
+                            "confidence": float(conf.item()),
+                            "bbox": (x1, y1, x2, y2)
+                        })
+
 
         name = tracked_people[tid]['name']
         x1, y1, x2, y2 = tracked_people[tid]['bbox']
@@ -537,13 +654,20 @@ while True:
         name = tracked_people[tid]['name']
         update_status_row(name, in_zone)
 
+        # Обновляем статус в Tkinter
+        if tracked_people[tid].get("last_objects", []) != objects_in_hands:
+            update_status_with_objects(name, objects_in_hands)
+            tracked_people[tid]["last_objects"] = objects_in_hands
+
+
+
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
         cv2.putText(frame, f"ID: {track_id} - {name}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
         # print(f"Время выполнения удаления записей о людях: {time.time() - s_time:.6f} секунд")
     # print(f"[INFO] Количество лиц в кадре: {len(faces)}")
 
     # s_time = time.time()
-    zone_pts = np.array(zone_bbox, dtype=np.int32)
+    # zone_pts = np.array(zone_bbox, dtype=np.int32)
     cv2.polylines(frame, [zone_pts], isClosed=True, color=(0, 255, 255), thickness=3)
 
     frame_resized = cv2.resize(frame, output_resolution)
