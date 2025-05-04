@@ -17,7 +17,7 @@ from facenet_pytorch import InceptionResnetV1
 import mediapipe as mp
 # from scipy.spatial.distance import cdist
 from collections import deque
-# import mediapipe as mp
+# import mediapipe as mp # Раньше использовал для детекции рук и детекции лиц
 
 
 # Настройки устройства и интерфейса
@@ -27,7 +27,7 @@ print(f"[INFO] Используется устройство: {device}")
 # Окно Tkinter
 root = tk.Tk()
 root.title("Присутствие сотрудников")
-root.geometry("300x600")
+root.geometry("400x600") # размеры окна ТКинтер
 status_frame = ttk.Frame(root)
 status_frame.pack(fill=tk.BOTH, expand=True)
 status_labels = {}
@@ -64,29 +64,33 @@ def create_status_row(name):
 
 
 # Обновление строки в UI
-def update_status_row(name, present):
+def update_status_row(name, present, objects_in_hands):
     if name == "Recognizing...":
         # Не обновляем статус для "Распознается..."
         return
     if name not in status_labels:
         create_status_row(name)
+    if objects_in_hands:
+        object_names = ", ".join([f"{obj['object']} ({obj['confidence']:.2f})" for obj in objects_in_hands])
+        text = f"\U0001F7E2 На рабочем месте: {object_names}" if present else f"⬛ Не на месте: {object_names}"
+    else:
+        text = "\U0001F7E2 На рабочем месте" if present else "⬛ Не на месте"
     icon = status_icons[present]
-    text = "\U0001F7E2 На рабочем месте" if present else "⬛ Не на месте"
     status_labels[name]["icon"].config(image=icon)
     status_labels[name]["label"].config(text=f"{name}: {text}")
 
 # Обновление строки с информацией о предметах
-def update_status_with_objects(name, objects_in_hands):
-    if name not in status_labels:
-        create_status_row(name)
-
-    if objects_in_hands:
-        object_names = ", ".join([f"{obj['object']} ({obj['confidence']:.2f})" for obj in objects_in_hands])
-        text = f"\U0001F7E2 На рабочем месте: {object_names}"
-    else:
-        text = "\U0001F7E2 На рабочем месте (без предметов)"
-
-    status_labels[name]["label"].config(text=f"{name}: {text}")
+# def update_status_with_objects(name, objects_in_hands):
+#     if name not in status_labels:
+#         create_status_row(name)
+#
+#     if objects_in_hands:
+#         object_names = ", ".join([f"{obj['object']} ({obj['confidence']:.2f})" for obj in objects_in_hands])
+#         text = f"\U0001F7E2 На рабочем месте: {object_names}"
+#     else:
+#         text = "\U0001F7E2 На рабочем месте (без предметов)"
+#
+#     status_labels[name]["label"].config(text=f"{name}: {text}")
 
 # Параметры окна
 scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0 # Масштаб
@@ -230,13 +234,21 @@ if os.path.exists(zone_path):
     zone_bbox = [tuple(pt) for pt in zone_data.get("points", [])]
     zone_scale = zone_data.get("scale", 1.0)
     zone_resolution = zone_data.get("resolution", [1920, 1080])
+    zone_resol_cam = zone_data.get("resolution_cam", [2560, 1440])
     input_resolution = (int(zone_resolution[0] * zone_scale), int(zone_resolution[1] * zone_scale))
     print(f"[INFO] Координаты зоны: {zone_bbox}")
     print(f"[INFO] Масштаб зоны: {zone_scale}")
     print(f"[INFO] Разрешение зоны: {zone_resolution}")
+    print(f"[INFO] Разрешение камеры зоны: {zone_resol_cam}")
 
     # if input_resolution != output_resolution:
     # Масштабируем координаты зоны под текущее разрешение и масштаб отображения
+    ratio_x = (width_cam) / (zone_resolution[0] * zone_scale)
+    ratio_y = (height_cam) / (zone_resolution[1] * zone_scale)
+    resolution_cam_new = ((width_cam), (height_cam)) # Разрешение камеры новое
+    # zone_bbox = [(int(x * ratio_x), int(y * ratio_y)) for (x, y) in zone_bbox]
+    # print(f"[INFO] Масштабированные координаты зоны: {zone_bbox}")
+
     ratio_x = (width_cam) / (zone_resolution[0] * zone_scale)
     ratio_y = (height_cam) / (zone_resolution[1] * zone_scale)
     zone_bbox = [(int(x * ratio_x), int(y * ratio_y)) for (x, y) in zone_bbox]
@@ -274,7 +286,6 @@ root.bind("<Escape>", on_escape)
 #     print(f"[INFO] {tag}: {fps:.3f} FPS")
 
 camera_wait = 0
-# time_count = 0
 
 # Основной цикл
 while True:
@@ -290,12 +301,8 @@ while True:
 
     # Если кадр успешно получен, сбрасываем счётчик ожиданий
     camera_wait = 0
-    # if time_count > 0:
 
     start_time = time.time()
-    # time_count += 1
-
-    # s_time = time.time()
 
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     faces = detect_faces(frame)
@@ -326,44 +333,9 @@ while True:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
                 label = f"{object_model.names[int(cls)]} ({conf:.2f})"
                 cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-        # print(f"удали {object_model.names[int(cls)]}")
 
-    #  Руки MediaPipe
-    # if hand_results.multi_hand_landmarks:
-    #     for hand_landmarks in hand_results.multi_hand_landmarks:
-    #         # Координаты для прямоугольника руки
-    #         h, w, _ = frame.shape
-    #         x_min, y_min = w, h
-    #         x_max, y_max = 0, 0
-    #
-    #         # Обходим все ключевые точки руки
-    #         for landmark in hand_landmarks.landmark:
-    #             x, y = int(landmark.x * w), int(landmark.y * h)
-    #             x_min = min(x_min, x)
-    #             y_min = min(y_min, y)
-    #             x_max = max(x_max, x)
-    #             y_max = max(y_max, y)
-    #
-    #         # Рисуем прямоугольник вокруг руки
-    #         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-    #         # Рисуем линии между точками руки
-    #         mp.solutions.drawing_utils.draw_landmarks(frame, hand_landmarks,
-    #                                                   mp_hands.HAND_CONNECTIONS)
 
     objects_in_hands = []  # Список объектов, находящихся в руках
-
-
-
-    # Детекция объектов в руках
-    # objects_in_hands, key_hand = detect_objects_in_hands(frame, pose_results)
-    # key_hand.extend([1, left_hand[0], left_hand[1], right_hand[0], right_hand[1]])
-    # if len(key_hand) >= 5:
-    #     if key_hand[0] and key_hand[1]:
-    #         cv2.circle(frame, (key_hand[1], key_hand[2]), 50, (0, 255, 0),
-    #                    5)  # желтая зона близости правой руки
-    #     if key_hand[0] and key_hand[3]:
-    #         cv2.circle(frame, (key_hand[3], key_hand[4]), 50, (0, 255, 0),
-    #                    5)  # желтая зона близости правой руки
 
     bodies = []
     if pose_results.boxes.id is not None:
@@ -375,8 +347,6 @@ while True:
         face_img = frame[y:y + h, x:x + w]
         if face_img is None or face_img.size == 0:
             continue
-
-        # s_time = time.time()
 
         # Преобразуем изображение лица в tensor и нормализуем
         face_tensor = torch.tensor(cv2.resize(face_img, required_size), dtype=torch.float32).permute(2, 0, 1) / 255.0
@@ -394,15 +364,10 @@ while True:
         min_dist, min_idx = torch.min(distances, dim=0)
         min_dist = min_dist.item()
 
-        # print(f"Минимальное расстояние: {min_dist}")
-        # print(f"Имя: {known_face_names[min_idx.item()]}")
-        # print(f"min_idx: {min_idx}, всего известных лиц: {len(known_face_names)}")
-
         face_center = np.array([x + w / 2, y + h / 2])
         assigned_body, min_body_dist = None, float("inf")
 
         for body in bodies:
-            # print(f"Body ID: {body['id']}, BBox: {body['bbox']}")
             bx1, by1, bx2, by2 = body['bbox']
             center = np.array([(bx1 + bx2) / 2, (by1 + by2) / 2])
             dist = np.linalg.norm(center - face_center)
@@ -412,16 +377,7 @@ while True:
         face_rect_color = (0, 255, 0)  # Зеленый по умолчанию
         face_text_top = ""
 
-        # if (time.time() - s_time) > 0.2:
-        #     cv2.imwrite(f"debug_faces/Векторы{tracked_people[track_id]['name']}_{int(time.time())}.jpg", face_img)
-        #
-        # print(f"Время выполнения нормализ векторов и сравн расст тел: {time.time() - s_time:.6f} секунд")
-
-        # s1_time = time.time()
-
         if assigned_body:
-            # print(f"[INFO] Проверка на тело")
-            # print(f"[INFO] min_dist: {min_dist}")
             track_id = assigned_body['id']
 
 
@@ -430,36 +386,12 @@ while True:
                 now = time.time()
                 current_name = tracked_people[track_id]['name'] # Старое имя
 
-
-
-                # Код для детекции предметов в руках MediaPipe
-                # if hand_results.multi_hand_landmarks:
-                #     if object_results.boxes is not None and len(object_results.boxes) > 0:
-                #         # Проверяем пересечение объектов с прямоугольником руки
-                #         for box, conf, cls in zip(object_results.boxes.xyxy, object_results.boxes.conf,
-                #                                   object_results.boxes.cls):
-                #             x1, y1, x2, y2 = map(int, box.tolist())
-                #             object_rect = (x1, y1, x2, y2)
-                #             hand_rect = (x_min, y_min, x_max, y_max)
-                #
-                #             # Если прямоугольники пересекаются
-                #             if rects_intersect(hand_rect, object_rect):
-                #                 objects_in_hands.append({
-                #                     "object": object_model.names[int(cls)],
-                #                     "confidence": float(conf.item()),
-                #                     "bbox": (x1, y1, x2, y2)
-                #                 })
-
-
-
-                # ✅ Обновление face_bbox даже если имя = Unknown
+                # ✅ Обновление face_bbox
                 # if name == "Unknown":
                 tracked_people[track_id]['face_bbox'] = (x, y, w, h)
 
                 # Проверяем, что лицо присутствует
                 if face_img is not None and face_img.size > 0:
-
-                    # s_time = time.time()
 
                     # Перепроверка лиц на точность распознания
                     if now - tracked_people[track_id].get("last_check2", 0) >= 1.0:
@@ -480,17 +412,13 @@ while True:
                                     for track_id2, p in tracked_people.items() if track_id2 != track_id
                                 )
                                 if not still_present and current_name in status_labels:
-                                    update_status_row(current_name, False)
+                                    update_status_row(current_name, False, objects_in_hands)
                                     if current_name == "Unknown":
                                         status_labels[current_name]["row"].destroy()
                                         del status_labels[current_name]
 
                         # Обновляем время последней проверки
                         tracked_people[track_id]['last_check2'] = now
-
-                        # print(f"Время выполнения Перепроверка лиц на точность распознания: {time.time() - s_time:.6f} секунд")
-
-                    # s_time = time.time()
 
                     # Сброс в Unknown при низкой уверенности в распозновании
                     if now - tracked_people[track_id].get("last_check1", 0) >= 0.4 and name != "Unknown":
@@ -511,21 +439,17 @@ while True:
                         if tracked_people[track_id]['confidence_window'].count(False) >= 4:
                             if current_name != "Unknown":
                                 tracked_people[track_id]['name'] = "Unknown"
-                                # print(f"[INFO] Новое имя: {tracked_people[track_id]['name']}")
                                 still_present = any(
                                     p['name'] == current_name and bbox_intersects_polygon(p['bbox'], zone_bbox)
                                     for track_id2, p in tracked_people.items() if track_id2 != track_id
                                 )
                                 if not still_present and current_name in status_labels:
-                                    update_status_row(current_name, False)
+                                    update_status_row(current_name, False, objects_in_hands)
 
                         # Обновляем время последней проверки
                         tracked_people[track_id]['last_check1'] = now
 
-                        # print(f"Время выполнения Сброс в Unknown при низкой уверенности в распозновании: {time.time() - s_time:.6f} секунд")
-
                 name = tracked_people[track_id]['name']
-                # distances = cdist(known_face_encodings, encoding, metric="cosine").flatten()
 
                 recog_conf = 1.0 - min_dist
                 face_text_top = f"ID: {track_id} - {name} ({recog_conf:.2f})"
@@ -544,8 +468,6 @@ while True:
                 else:
                     # ✅ обновляем координаты лица каждый кадр, пока лицо распознается
                     pending_faces[track_id]['face_bbox'] = (x, y, w, h)
-                    # distances = cdist(known_face_encodings, encoding, metric="cosine").flatten()
-                    # min_dist = np.min(distances)
                     if min_dist < recognition_t:
                         # used_names = [p['name'] for p in tracked_people.values()]
                         matched_name = known_face_names[min_idx.item()]
@@ -584,8 +506,6 @@ while True:
                     face_text_top = f"ID: {track_id} - Recognizing..."
                     face_rect_color = (0, 255, 255)
 
-            # print(f"Время выполнения assigned_body: {time.time() - s1_time:.6f} секунд")
-
         # --- Отрисовка прямоугольника вокруг лица и текстов ---
         cv2.rectangle(frame, (x, y), (x + w, y + h), face_rect_color, 2)
 
@@ -593,7 +513,7 @@ while True:
             cv2.putText(frame, face_text_top, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, face_rect_color, 2)
 
         cv2.putText(frame, f"{confidence:.2f}", (x, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-    # s_time = time.time()
+
     for body in bodies:
         if body['id'] not in tracked_people:
             continue
@@ -602,13 +522,11 @@ while True:
             tracked_people[track_id]['bbox'] = body['bbox']
             tracked_people[track_id]['last_seen'] = time.time()
 
-    # print(f"Время body in bodies: {time.time() - s_time:.6f} секунд")
-    # s_time = time.time()
     # удаления записей о людях из списка tracked_people, если они не были замечены в кадре более 5 секунд
     for tid in list(set(list(tracked_people.keys()) + list(pending_faces.keys()))):
         if tid in tracked_people and time.time() - tracked_people[tid]['last_seen'] > 5:
             name = tracked_people[tid]['name']
-            update_status_row(name, False)  # ✅ Обновляем статус как "Не на месте"
+            update_status_row(name, False, objects_in_hands)  # ✅ Обновляем статус как "Не на месте"
             del tracked_people[tid]
             if tid in pending_faces:
                 del pending_faces[tid]
@@ -652,22 +570,19 @@ while True:
 
         # Обновляем переменную name из актуального состояния tracked_people
         name = tracked_people[tid]['name']
-        update_status_row(name, in_zone)
+
+        update_status_row(name, in_zone, objects_in_hands)
 
         # Обновляем статус в Tkinter
-        if tracked_people[tid].get("last_objects", []) != objects_in_hands:
-            update_status_with_objects(name, objects_in_hands)
-            tracked_people[tid]["last_objects"] = objects_in_hands
+        # if tracked_people[tid].get("last_objects", []) != objects_in_hands:
+        #     update_status_with_objects(name, objects_in_hands)
+        #     tracked_people[tid]["last_objects"] = objects_in_hands
 
 
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
         cv2.putText(frame, f"ID: {track_id} - {name}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-        # print(f"Время выполнения удаления записей о людях: {time.time() - s_time:.6f} секунд")
-    # print(f"[INFO] Количество лиц в кадре: {len(faces)}")
 
-    # s_time = time.time()
-    # zone_pts = np.array(zone_bbox, dtype=np.int32)
     cv2.polylines(frame, [zone_pts], isClosed=True, color=(0, 255, 255), thickness=3)
 
     frame_resized = cv2.resize(frame, output_resolution)
@@ -682,8 +597,6 @@ while True:
         print("[INFO] Окно Tkinter закрыто. Завершение работы.")
         break
     root.update()
-
-    # print(f"Время отрисовки и UI: {time.time() - s_time:.6f} секунд")
 
     # Проверка закрытия окна OpenCV
     if cv2.getWindowProperty("Face + Body Tracking", cv2.WND_PROP_VISIBLE) < 1:

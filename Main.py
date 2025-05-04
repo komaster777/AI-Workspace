@@ -14,10 +14,17 @@ DATASET_PATH = "dataset/"
 
 # Функция для съемки и сохранения лица
 def capture_face():
+    scale_value = scale_var.get()  # Получаем текущий масштаб
+    width, height = resolution_options[selected_resolution.get()]  # Получаем высоту и ширину окна
+    output_resolution = (int(width * scale_value), int(height * scale_value))
+
+    width_cam, height_cam = resol_cam_options[selected_resol_cam.get()] # Получаем разрешенеи камеры
+
+
     cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
-    cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width_cam)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height_cam)
+    # cap.set(cv2.CAP_PROP_FPS, 30)
 
     if not cap.isOpened():
         messagebox.showerror("Ошибка", "Не удалось подключиться к камере.")
@@ -29,10 +36,14 @@ def capture_face():
             messagebox.showerror("Ошибка", "Не удалось получить изображение с камеры.")
             break
 
-        # Отображаем видео
-        cv2.putText(frame, "Press 's' to save, 'q' to cancel", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        frame_resized = cv2.resize(frame, output_resolution)
+        # Копируем оригинальный кадр, чтобы сохранить его без текста
+        original_frame = frame.copy()
 
-        cv2.imshow("Захват лица", frame)
+        # Отображаем видео
+        cv2.putText(frame, "Press 's' to save, 'q','esc' to cancel", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        cv2.imshow("Face capture", frame)
 
         key = cv2.waitKey(1) & 0xFF
 
@@ -68,12 +79,12 @@ def capture_face():
             # Вычисление следующего номера для изображения
             image_count = len([f for f in os.listdir(person_folder) if f.endswith(('.png', '.jpg', '.jpeg'))]) + 1
             image_path = os.path.join(person_folder, f"{image_count}.jpg")
-            cv2.imwrite(image_path, frame)
+            cv2.imwrite(image_path, original_frame)
             messagebox.showinfo("Успех", f"Изображение сохранено: {image_path}")
 
             break
 
-        elif key == ord('q'):
+        elif key == ord('q') or key == 27:
             messagebox.showinfo("Отмена", "Съемка отменена.")
             break
 
@@ -101,12 +112,17 @@ def update_scale_label(value):
 
 # Функция для определения рабочей зоны
 def define_work_zone():
+    scale_value = scale_var.get()  # Получаем текущий масштаб
+    width, height = resolution_options[selected_resolution.get()]  # Получаем высоту и ширину окна
+    output_resolution = (int(width * scale_value), int(height * scale_value))
+    width_cam, height_cam = resol_cam_options[selected_resol_cam.get()]  # Получаем разрешенеи камеры
+
     cap = cv2.VideoCapture(0, cv2.CAP_MSMF)
 
     # Устанавливаем разрешение
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
-    cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width_cam)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height_cam)
+    # cap.set(cv2.CAP_PROP_FPS, 30)
 
     ret, frame = cap.read()
     cap.release()
@@ -116,9 +132,6 @@ def define_work_zone():
         messagebox.showerror("Ошибка", "Не удалось получить изображение с камеры.")
         return
 
-    scale_value = scale_var.get()  # Получаем текущий масштаб
-    width, height = resolution_options[selected_resolution.get()]  # Получаем высоту и ширину
-    output_resolution = (int(width * scale_value), int(height * scale_value))
     frame_resized = cv2.resize(frame, output_resolution)
 
     # Сохраняем снимок
@@ -199,7 +212,8 @@ def define_work_zone():
         zone_data = {
             "points": points,
             "scale": scale_var.get(),  # сохраняем выбранный масштаб
-            "resolution": resolution_options[selected_resolution.get()]
+            "resolution": resolution_options[selected_resolution.get()],
+            "resolution_cam": resol_cam_options[selected_resol_cam.get()]
         }
         with open("work_zone.json", "w") as f:
             json.dump(zone_data, f)
@@ -216,7 +230,7 @@ root = tk.Tk()
 root.title("Настройки Face & Body Recognition")
 
 # Устанавливаем размер окна
-root.geometry("400x400")
+root.geometry("400x450")
 
 btn_capture = tk.Button(root, text="📸 Снять и сохранить лицо", command=capture_face)
 btn_capture.pack(pady=10)
@@ -271,26 +285,15 @@ selected_resol_cam = tk.StringVar(value="2560 x 1440")
 resol_cam_combobox = ttk.Combobox(root, textvariable=selected_resol_cam, values=list(resol_cam_options.keys()), state="readonly")
 resol_cam_combobox.pack(pady=5)
 
-# resolution_frame = tk.Frame(root)
-# resolution_frame.pack(pady=5)
-#
-# width_var = tk.IntVar(value=1920)  # Значение ширины по умолчанию
-# height_var = tk.IntVar(value=1080)  # Значение высоты по умолчанию
-#
-# width_entry = tk.Entry(resolution_frame, textvariable=width_var, width=10)
-# width_entry.pack(side="left", padx=5)
-#
-# x_label = tk.Label(resolution_frame, text="x")
-# x_label.pack(side="left")
-#
-# height_entry = tk.Entry(resolution_frame, textvariable=height_var, width=10)
-# height_entry.pack(side="left", padx=5)
-
 btn_start = tk.Button(root, text="▶ Запустить Face & Body Recognition", command=start_recognition)
 btn_start.pack(pady=10)
 
 btn_zone = tk.Button(root, text="◼ Обозначить рабочую зону", command=define_work_zone)
-btn_zone.pack(pady=10)
+btn_zone.pack(pady=(10, 0))
+note1 = tk.Label(root, text="Примечание: лучше сохранять зону с теми параметрами камеры, ")
+note1.pack(pady=(0, 0))
+note2 = tk.Label(root, text="с которыми будет запускаться распознавание (соотношение сторон)")
+note2.pack(pady=(0, 5))
 
 # Завершение по ESC
 def on_escape(event=None):
