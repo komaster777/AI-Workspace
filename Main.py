@@ -103,7 +103,11 @@ def start_recognition():
     scale_value = scale_var.get()  # Получаем текущий масштаб
     width, height = resolution_options[selected_resolution.get()] # Получаем высоту и ширину окна
     width_cam, height_cam = resol_cam_options[selected_resol_cam.get()]  # Получаем высоту и ширину окна
-    subprocess.Popen(["python", "Main Recognition.py", str(scale_value), str(width), str(height), str(width_cam), str(height_cam)])
+    rec_t_value = sel_rec_t.get()
+    hands_r_value = sel_hands_r.get()
+    vector_r_value = sel_vector_r.get()
+    subprocess.Popen(["python", "Main Recognition.py", str(scale_value), str(width), str(height), str(width_cam), str(height_cam),
+                      str(rec_t_value), str(hands_r_value), str(vector_r_value)])
 
 
 # Функция для обновления метки текущего значения масштаба
@@ -230,7 +234,7 @@ root = tk.Tk()
 root.title("Настройки Face & Body Recognition")
 
 # Устанавливаем размер окна
-root.geometry("400x450")
+root.geometry("400x600")
 
 btn_capture = tk.Button(root, text="📸 Снять и сохранить лицо", command=capture_face)
 btn_capture.pack(pady=10)
@@ -294,6 +298,29 @@ note1 = tk.Label(root, text="Примечание: лучше сохранять
 note1.pack(pady=(0, 0))
 note2 = tk.Label(root, text="с которыми будет запускаться распознавание (соотношение сторон)")
 note2.pack(pady=(0, 5))
+
+Dop = tk.Label(root, text="Дополнительные параметры")
+Dop.pack(pady=(0, 5))
+Dop1 = tk.Label(root, text="Порог распознания:")
+Dop1.pack(pady=(0, 1))
+
+sel_rec_t = tk.StringVar(value="0.6")
+rec_t = tk.Entry(root, textvariable=sel_rec_t, width=6)
+rec_t.pack(pady=5)
+
+Dop2 = tk.Label(root, text="Радиус рук (порог распознания: от центра объекта до центра руки):")
+Dop2.pack(pady=(0, 1))
+
+sel_hands_r = tk.StringVar(value="300")
+hands_r = tk.Entry(root, textvariable=sel_hands_r, width=8)
+hands_r.pack(pady=5)
+
+Dop3 = tk.Label(root, text="Длина, на которую нужно сместить точку руки от локтя):")
+Dop3.pack(pady=(0, 1))
+
+sel_vector_r = tk.StringVar(value="150")
+vector_r = tk.Entry(root, textvariable=sel_vector_r, width=8)
+vector_r.pack(pady=5)
 
 # Завершение по ESC
 def on_escape(event=None):
