@@ -3,8 +3,9 @@ import cv2
 import numpy as np
 import pickle
 import torch
-from insightface.app import FaceAnalysis
-
+from facenet_pytorch import InceptionResnetV1
+from torchvision import transforms
+from ultralytics import YOLO
 
 # ✅ Используем GPU, если он доступен
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -15,10 +16,24 @@ OUTPUT_FILE = "face_encodings.pkl"
 REQUIRED_SIZE = (160, 160)
 
 # ✅ Инициализация моделей
-# ✅ Инициализация InsightFace для детекции и извлечения эмбеддингов
-face_app = FaceAnalysis(name="buffalo_l")  # Используем предобученный пакет
-face_app.prepare(ctx_id=0 if device == "cuda" else -1)
+facenet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
+face_model = YOLO("yolov8n-face.pt").to(device)
+face_model.to("cuda")  # Явно переносим на GPU
 
+# Проверка, работает ли YOLO face на GPU
+face_model_device = face_model.device
+if face_model_device.type == 'cuda':
+    print(f"[INFO] YOLO face модель работает на GPU: {face_model_device}")
+else:
+    print(f"[INFO] YOLO face модель работает на CPU")
+
+# ✅ Преобразования для PyTorch
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize(REQUIRED_SIZE),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5], std=[0.5])  # Нормализация для FaceNet
+])
 
 # ✅ Удаление старой базы перед обновлением
 if os.path.exists(OUTPUT_FILE):
@@ -32,18 +47,20 @@ def process_image(image_path):
     """Создает эмбеддинг лица из изображения"""
     image = cv2.imread(image_path)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Используем YOLO для детекции лиц
+    results = face_model.predict(image_rgb, imgsz=640, conf=0.5, verbose=False)[0]
 
-    # Используем InsightFace для детекции лиц
-    faces = face_app.get(image_rgb)
-    if faces:  # Если лица найдены
-        for face in faces:
-            bbox = face.bbox.astype(int)  # Координаты лица
-            embedding = face.embedding  # Эмбеддинг лица
-            x1, y1, x2, y2 = bbox
-            print(f"[INFO] Лицо найдено: координаты ({x1}, {y1}, {x2}, {y2})")
-            return embedding
+    if results.boxes is not None:  # Проверяем, найдены ли лица
+        for box in results.boxes.xyxy:  # Координаты боксов
+            x1, y1, x2, y2 = map(int, box.tolist())  # Извлекаем координаты
+            face = image_rgb[y1:y2, x1:x2]  # Вырезаем область лица
+
+            if face.shape[0] > 0 and face.shape[1] > 0:
+                face_tensor = transform(face).unsqueeze(0).to(device)  # Преобразуем в PyTorch тензор
+                with torch.no_grad():
+                    encoding = facenet(face_tensor).cpu().numpy().flatten()
+                return encoding
     return None
-
 
 # ✅ Проход по папкам и добавление новых лиц
 for person_name in os.listdir(DATASET_PATH):
@@ -63,7 +80,7 @@ for person_name in os.listdir(DATASET_PATH):
 
 # ✅ Сохранение эмбеддингов как тензоров
 with open(OUTPUT_FILE, "wb") as f:
-    pickle.dump({"encodings": np.array(known_encodings), "names": known_names}, f)
+    pickle.dump({"encodings": known_encodings, "names": known_names}, f)
 
 print(f"[✅] Файл эмбеддингов обновлен: {OUTPUT_FILE}")
 print(f"[INFO] Всего лиц: {len(known_names)}")

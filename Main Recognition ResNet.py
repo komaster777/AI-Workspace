@@ -13,13 +13,12 @@ import json
 from tkinter import ttk
 from PIL import Image, ImageTk
 from ultralytics import YOLO
-from insightface.app import FaceAnalysis
+from facenet_pytorch import InceptionResnetV1
 import mediapipe as mp
 # from scipy.spatial.distance import cdist
 from collections import deque
+# import mediapipe as mp # Раньше использовал для детекции рук и детекции лиц
 #nvcc --version
-#pipreqs . --force
-#pip freeze > requirements_all.txt
 
 
 # Настройки устройства и интерфейса
@@ -109,14 +108,11 @@ print(f"[INFO] Разрешение камеры: {width_cam}x{height_cam}")
 # Модели
 object_model = YOLO("yolo11s.pt").to(device)
 object_model.to("cuda")  # Явно переносим на GPU
+face_model = YOLO("yolov8n-face.pt").to(device)
+face_model.to("cuda")  # Явно переносим на GPU
 pose_model = YOLO("yolov8n-pose.pt").to(device)
 pose_model.to("cuda")  # Явно переносим на GPU
-# Загрузка модели InsightFace
-face_app = FaceAnalysis(name='buffalo_l')
-ctx_id = 0 if torch.cuda.is_available() else -1
-face_app.prepare(ctx_id=ctx_id)
-# Проверка провайдеров
-print("[INFO] Провайдеры модели:", face_app.models['recognition'].session.get_providers())
+facenet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
 # Инициализация модели отслеживания рук с использованием GPU
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=1)
@@ -135,59 +131,45 @@ if pose_model_device.type == 'cuda':
 else:
     print(f"[INFO] YOLO pose модель работает на CPU")
 
+# Проверка, работает ли YOLO face на GPU
+face_model_device = face_model.device
+if face_model_device.type == 'cuda':
+    print(f"[INFO] YOLO face модель работает на GPU: {face_model_device}")
+else:
+    print(f"[INFO] YOLO face модель работает на CPU")
+
+# Проверка, работает ли FaceNet на GPU
+if device.type == 'cuda':
+    print(f"[INFO] FaceNet работает на GPU: {device}")
+else:
+    print(f"[INFO] FaceNet работает на CPU")
 
 # Порог распознавания
 recognition_t = 0.6
 required_size = (160, 160)
 
-# Функция загрузки эмбеддингов лиц
+# Загрузка эмбеддингов лиц
 def load_encodings(path="face_encodings.pkl"):
     with open(path, "rb") as f:
         data = pickle.load(f)
     return np.array(data["encodings"]), data["names"]
 
-# Загрузка известных лиц
 known_face_encodings_np, known_face_names = load_encodings()
-# Нормализуем эмбеддинги
-known_norm = known_face_encodings_np / np.linalg.norm(known_face_encodings_np, axis=1, keepdims=True)
+known_face_encodings = torch.tensor(known_face_encodings_np, dtype=torch.float32).to(device)
+# Нормализуем векторы
+known_norm = torch.nn.functional.normalize(known_face_encodings, dim=1)
 
-# Функция для детекции и извлечения эмбеддингов лиц
-def detect_and_encode_faces(image):
-    faces = face_app.get(image)
-    face_encodings = []
-    face_locations = []
-    face_confidences = []  # Для хранения уверенности детекции
-
-    for face in faces:
-        embedding = face.normed_embedding  # Нормализованный эмбеддинг
-        bbox = face.bbox.astype(int)  # Прямоугольник лица
-        confidence = face.det_score  # Уверенность детекции лица
-        x1, y1, x2, y2 = bbox
-        w, h = x2 - x1, y2 - y1
-        face_encodings.append(embedding)
-        face_locations.append((x1, y1, w, h))
-        face_confidences.append(confidence)  # Сохраняем уверенность
-
-    return face_locations, face_encodings, face_confidences
-
-# Распознавание лиц
-def recognize_faces(face_encodings):
-    recognized_faces = []
-
-    for encoding in face_encodings:
-        # Нормализуем входной эмбеддинг
-        encoding_norm = encoding / np.linalg.norm(encoding)
-        # Вычисляем косинусное расстояние
-        distances = 1 - np.dot(known_norm, encoding_norm)
-        min_dist_idx = np.argmin(distances)
-        min_dist = distances[min_dist_idx]
-
-        # Распознаем лицо, если расстояние меньше порога
-        name = known_face_names[min_dist_idx] if min_dist < recognition_t else "Unknown"
-        recognized_faces.append((name, min_dist, min_dist_idx))  # Возвращаем индекс
-
-    return recognized_faces
-
+# Детекция лиц через YOLO
+def detect_faces(image):
+    results = face_model.predict(image, imgsz=640, conf=0.5, verbose=False)[0]
+    faces = []
+    if results.boxes is not None:
+        for box, conf in zip(results.boxes.xyxy, results.boxes.conf):
+            x1, y1, x2, y2 = map(int, box.tolist())
+            w, h = x2 - x1, y2 - y1
+            confidence = float(conf.item())
+            faces.append((x1, y1, w, h, confidence))
+    return faces
 
 # Функция для вычисления пересечения двух прямоугольников
 def rects_intersect(body_rect, obj_rect):
@@ -308,7 +290,7 @@ camera_wait = 0
 
 # Основной цикл
 while True:
-    if not ret and camera_wait >= 100:
+    if not ret and camera_wait >= 10:
         print("[ERROR] Нет кадра с камеры")
         break
     if not ret or frame is None:
@@ -324,14 +306,7 @@ while True:
     start_time = time.time()
 
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-    face_locations, face_encodings, confidence = detect_and_encode_faces(frame_rgb)
-    recognized_faces = recognize_faces(face_encodings)
-
-
-
-
-
+    faces = detect_faces(frame)
     pose_results = pose_model.track(frame, persist=True, imgsz=640, conf=0.5, verbose=False)[0]
 
     # Обрабатываем кадр для получения ключевых точек рук MediaPipe
@@ -369,15 +344,26 @@ while True:
             x1, y1, x2, y2 = map(int, box.cpu().numpy())
             bodies.append({'id': tid, 'bbox': (x1, y1, x2, y2)})
     # print(f"Время работы с box: {time.time() - s_time:.6f} секунд")
-    for (x, y, w, h), confidence_detect, (name, min_dist, min_dist_idx) in zip(face_locations, confidence, recognized_faces):
+    for (x, y, w, h, confidence) in faces:
         face_img = frame[y:y + h, x:x + w]
         if face_img is None or face_img.size == 0:
             continue
 
+        # Преобразуем изображение лица в tensor и нормализуем
+        face_tensor = torch.tensor(cv2.resize(face_img, required_size), dtype=torch.float32).permute(2, 0, 1) / 255.0
+        face_tensor = face_tensor.unsqueeze(0).to(device)
 
-        confidence = 1 - min_dist
+        with torch.no_grad():
+            encoding = facenet(face_tensor)  # shape: (1, 512)
 
+        # Нормализуем векторы
+        encoding_norm = torch.nn.functional.normalize(encoding, dim=1)
 
+        # Вычисляем косинусную близость, затем преобразуем в косинусное расстояние
+        cos_sim = torch.mm(known_norm, encoding_norm.t()).squeeze(1)  # shape: (N,)
+        distances = 1 - cos_sim  # shape: (N,)
+        min_dist, min_idx = torch.min(distances, dim=0)
+        min_dist = min_dist.item()
 
         face_center = np.array([x + w / 2, y + h / 2])
         assigned_body, min_body_dist = None, float("inf")
@@ -413,7 +399,7 @@ while True:
                         # print("[INFO] Проверка на перераспознание")
                         # print(f"[INFO] min_dist: {min_dist}")
                         if min_dist < recognition_t:
-                            new_name = known_face_names[min_dist_idx.item()]
+                            new_name = known_face_names[min_idx.item()]
 
                             # Проверяем, изменилось ли имя
                             if new_name != current_name and new_name != "Unknown":
@@ -475,7 +461,7 @@ while True:
 
                 if track_id not in pending_faces:
                     pending_faces[track_id] = {
-                        'encoding': face_encodings,
+                        'encoding': encoding,
                         'first_seen': now,
                         'bbox': assigned_body['bbox'],
                         'face_bbox': (x, y, w, h)
@@ -485,7 +471,7 @@ while True:
                     pending_faces[track_id]['face_bbox'] = (x, y, w, h)
                     if min_dist < recognition_t:
                         # used_names = [p['name'] for p in tracked_people.values()]
-                        matched_name = known_face_names[min_dist_idx.item()]
+                        matched_name = known_face_names[min_idx.item()]
                         # if matched_name not in used_names:
                         tracked_people[track_id] = {
                             'name': matched_name,
@@ -527,7 +513,7 @@ while True:
         if face_text_top:
             cv2.putText(frame, face_text_top, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, face_rect_color, 2)
 
-        cv2.putText(frame, f"{confidence_detect:.2f}", (x, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        cv2.putText(frame, f"{confidence:.2f}", (x, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
     for body in bodies:
         if body['id'] not in tracked_people:
