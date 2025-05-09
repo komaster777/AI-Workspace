@@ -116,7 +116,7 @@ print(f"[INFO] Разрешение камеры: {width_cam}x{height_cam}")
 # Модели
 object_model = YOLO("yolo11s.pt").to(device)
 object_model.to("cuda")  # Явно переносим на GPU
-pose_model = YOLO("yolov8n-pose.pt").to(device)
+pose_model = YOLO("yolo11s-pose.pt").to(device)
 pose_model.to("cuda")  # Явно переносим на GPU
 # Загрузка модели InsightFace
 face_app = FaceAnalysis(name='buffalo_l')
@@ -262,15 +262,15 @@ def vector(hand_coords, elbow_coords):
         hand_y = hand_y + vector_y * scale
 
         hand = (hand_x, hand_y)
-        print(f"x, y: {hand}")
+        # print(f"x, y: {hand}")
         return hand
     else: return hand_coords
 
 
-def detect_objects_in_hands(frame, pose_results):
+def detect_objects_in_hands(frame, pose_results, result):
     objects_in_hands = []
     key_hand = array.array('i')
-    ignored_classes = ["person", "car", "cat"]
+    ignored_classes = ["person", "car", "cat", "bed"]
     base_width = 1920
     base_height = 1080
     base_width_cam = 2560
@@ -285,9 +285,9 @@ def detect_objects_in_hands(frame, pose_results):
     Left_kpconf = 0
     Right_kpconf = 0
 
-    results = object_model.predict(frame, imgsz=640, conf=0.5, verbose=False)[0]
+
     # print("Вызов функции")
-    if pose_results.keypoints is not None and results.boxes is not None:
+    if pose_results.keypoints is not None and result.boxes is not None and len(result.boxes) > 0:
         # print(f"[DEBUG] Количество поз: {len(pose_results.keypoints)}")
         # print(f"[DEBUG] Ключевые точки поз: {pose_results.keypoints}")
         # Используем атрибут 'data' для доступа к ключевым точкам
@@ -304,8 +304,8 @@ def detect_objects_in_hands(frame, pose_results):
             # Координаты левой и правой руки
             if (left_kp is not None and right_kp is not None
                     and left_eb is not None and right_eb is not None and
-                    left_kp[2] > 0.7 and right_kp[2] > 0.7 and
-                    left_eb[2] > 0.7 and right_eb[2] > 0.7 and
+                    left_kp[2] > 0.6 and right_kp[2] > 0.6 and
+                    left_eb[2] > 0.6 and right_eb[2] > 0.6 and
                     not torch.all(left_kp[:2] == 0) and not torch.all(right_kp[:2] == 0)
                     and not torch.all(left_eb[:2] == 0) and not torch.all(right_eb[:2] == 0)):
                 left_hand = left_kp[:2].cpu().numpy()
@@ -336,10 +336,10 @@ def detect_objects_in_hands(frame, pose_results):
                                  int(right_hand[0]), int(right_hand[1])])
                 # print("Рисуем обе")
                 # print(f"[DEBUG] Левая рука: {left_kp}, Правая рука: {right_kp}, уверенность правой{right_kp[2]}, уверенность левой {left_kp[2]}")
-                for box, conf, cls in zip(results.boxes.xyxy, results.boxes.conf, results.boxes.cls):
+                for box, track_id, conf, cls in zip(result.boxes.xyxy, result.boxes.id, result.boxes.conf, result.boxes.cls):
                     class_name = object_model.names[int(cls)]
                     if class_name not in ignored_classes:
-                        x1, y1, x2, y2 = map(int, box.tolist())
+                        x1, y1, x2, y2 = map(int, box)
 
                         object_center = np.array([(x1 + x2) // 2, (y1 + y2) // 2])
                         distance_to_left = np.linalg.norm(left_hand - object_center)
@@ -363,12 +363,12 @@ def detect_objects_in_hands(frame, pose_results):
                             # Отрисовка прямоугольника
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Прямоугольник
                             label = f"{object_model.names[int(cls)]} ({conf:.2f})"
-                            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
             else:
                 # Проверка, что точки не пустые (например, не [0, 0, 0] или NaN)
                 if (left_kp is not None and not torch.all(left_kp[:2] == 0)
                         and left_eb is not None and not torch.all(left_eb[:2] == 0) and
-                        left_kp[2] > 0.7 and left_eb[2] > 0.7):
+                        left_kp[2] > 0.6 and left_eb[2] > 0.6):
                     left_hand = left_kp[:2].cpu().numpy()
                     left_elbow = left_eb[:2].cpu().numpy()
 
@@ -381,10 +381,10 @@ def detect_objects_in_hands(frame, pose_results):
                     # print("Рисуем левую")
                     # print(f"[DEBUG] Левая рука: {left_kp}, Правая рука: {right_kp}, уверенность правой{right_kp[2]}, уверенность левой {left_kp[2]}")
                     # Проверяем пересечение объектов с руками
-                    for box, conf, cls in zip(results.boxes.xyxy, results.boxes.conf, results.boxes.cls):
+                    for box, track_id, conf, cls in zip(result.boxes.xyxy, result.boxes.id, result.boxes.conf, result.boxes.cls):
                         class_name = object_model.names[int(cls)]
                         if class_name not in ignored_classes:
-                            x1, y1, x2, y2 = map(int, box.tolist())
+                            x1, y1, x2, y2 = map(int, box)
                             object_center = np.array([(x1 + x2) // 2, (y1 + y2) // 2])
                             distance_to_left = np.linalg.norm(left_hand - object_center)
 
@@ -407,11 +407,11 @@ def detect_objects_in_hands(frame, pose_results):
                                 # Отрисовка прямоугольника
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Прямоугольник
                                 label = f"{object_model.names[int(cls)]} ({conf:.2f})"
-                                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
                 # Проверка, что точки не пустые (например, не [0, 0, 0] или NaN)
                 if (right_kp is not None and not torch.all(right_kp[:2] == 0)
                         and right_eb is not None and not torch.all(right_eb[:2] == 0)
-                        and right_kp[2] > 0.7 and right_eb[2] > 0.7):
+                        and right_kp[2] > 0.6 and right_eb[2] > 0.6):
                     right_hand = right_kp[:2].cpu().numpy()
                     right_elbow = right_eb[:2].cpu().numpy()
                     Right_kpconf = right_kp[2]
@@ -423,10 +423,10 @@ def detect_objects_in_hands(frame, pose_results):
                     # print("Рисуем правую")
                     # print(f"[DEBUG] Левая рука: {left_kp}, Правая рука: {right_kp}, уверенность правой{right_kp[2]}, уверенность левой {left_kp[2]}")
                     # Проверяем пересечение объектов с руками
-                    for box, conf, cls in zip(results.boxes.xyxy, results.boxes.conf, results.boxes.cls):
+                    for box, track_id, conf, cls in zip(result.boxes.xyxy, result.boxes.id, result.boxes.conf, result.boxes.cls):
                         class_name = object_model.names[int(cls)]
                         if class_name not in ignored_classes:
-                            x1, y1, x2, y2 = map(int, box.tolist())
+                            x1, y1, x2, y2 = map(int, box)
                             object_center = np.array([(x1 + x2) // 2, (y1 + y2) // 2])
                             distance_to_right = np.linalg.norm(right_hand - object_center)
                             # # Вычисляем ширину и высоту объекта
@@ -448,7 +448,7 @@ def detect_objects_in_hands(frame, pose_results):
                                 # Отрисовка прямоугольника
                                 cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Прямоугольник
                                 label = f"{object_model.names[int(cls)]} ({conf:.2f})"
-                                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
     return objects_in_hands, key_hand, distance_threshold, Left_kpconf, Right_kpconf
 
 # Проверка пересечения прямоугольника и четырехугольника
@@ -553,7 +553,7 @@ camera_wait = 0
 
 # Основной цикл
 while True:
-    if not ret and camera_wait >= 100:
+    if not ret and camera_wait >= 10:
         print("[ERROR] Нет кадра с камеры")
         break
     if not ret or frame is None:
@@ -573,10 +573,53 @@ while True:
     face_locations, face_encodings, confidence = detect_and_encode_faces(frame_rgb)
     recognized_faces = recognize_faces(face_encodings)
 
-    pose_results = pose_model.track(frame, persist=True, imgsz=640, conf=0.5, verbose=False)[0]
+    pose_results = pose_model.track(
+        frame,
+        persist=True,
+        imgsz=640,
+        conf=0.5,
+        verbose=False,
+        tracker="botsort.yaml"  # Добавьте это
+    )[0]
 
+
+    # Настройка трекинга с Bot-SORT
+    results = object_model.track(
+        frame,  # Текущий кадр (например, из OpenCV)
+        persist=True,  # Сохраняем треки между кадрами
+        imgsz=640,  # Размер изображения для обработки
+        conf=0.3,  # Порог уверенности для детекции
+        tracker="botsort.yaml",  # Указываем путь к конфигурации трекера
+        verbose=False  # Отключаем лишние логи
+    )
     # Обрабатываем кадр для получения ключевых точек рук MediaPipe
     # hand_results = hands.process(frame_rgb)
+
+    ignored_classes = ["person", "car", "cat", "bed"]
+
+
+    for result in results:
+        # Детекция объектов в руках
+        objects_in_hands, key_hand, distance_threshold, left_kp, right_kp = detect_objects_in_hands(frame,
+                                                                                                    pose_results,
+                                                                                                    result)
+        if result.boxes is not None and len(result.boxes) > 0:  # Проверяем, есть ли детекции в кадре
+            for box, track_id, conf, cls in zip(result.boxes.xyxy, result.boxes.id, result.boxes.conf, result.boxes.cls):
+                class_name = object_model.names[int(cls)]
+                if class_name not in ignored_classes:
+                    x1, y1, x2, y2 = map(int, box)
+                    is_in_hands = False
+                    if objects_in_hands:
+                        # Проверяем, есть ли объект в списке objects_in_hands
+                        for obj in objects_in_hands:
+                            if obj["bbox"] == (x1, y1, x2, y2):
+                                is_in_hands = True
+                                break
+                    # Если объект не в руках, отрисовываем его
+                    if not is_in_hands:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 247, 239), 2)
+                        label = f"ID: {track_id} {class_name} ({conf:.2f})"
+                        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 247, 239), 2)
 
 
 
@@ -772,9 +815,7 @@ while True:
         if tid not in tracked_people:
             continue  # ни в pending_faces, ни в tracked_people
 
-        # Детекция объектов в руках
-        objects_in_hands, key_hand, distance_threshold, left_kp, right_kp = detect_objects_in_hands(frame,
-                                                                                                    pose_results)
+
         # key_hand.extend([1, left_hand[0], left_hand[1], right_hand[0], right_hand[1]])
         # Ограничиваем значение distance_threshold
         distance_threshold = min(distance_threshold, min(width, height) // 2)  # Не больше 1/4 меньшей стороны
